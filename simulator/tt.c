@@ -6,6 +6,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "../multipass/interface.h"
+
 void tele_tr(uint8_t i, int16_t v) {
     printf("TR  i:%" PRIu8 " v:%" PRId16, i, v);
     printf("\n");
@@ -31,6 +33,7 @@ int main() {
     in = malloc(256);
 
     printf("teletype. (blank line quits)\n\n");
+    printf("CV Output Count  i:%" PRIu8, get_cv_output_count());
 
     do {
         printf("> ");
