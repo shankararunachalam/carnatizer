@@ -9,7 +9,6 @@
 // should talk to the engine via what's defined in engine.h only
 // ----------------------------------------------------------------------------
 
-#include "compiler.h"
 #include "string.h"
 
 #include "control.h"
