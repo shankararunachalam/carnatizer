@@ -164,18 +164,25 @@ void process_event(u8 event, u8 *data, u8 length) {
         case ARC_ENCODER_COARSE:
             break;
     
+        case BUTTON_PRESSED:
+        case FRONT_BUTTON_HELD:
         case FRONT_BUTTON_PRESSED:
-            if(state == SELECT) {
+            if(state == SELECT && data[0] == 1) {
                 state = PLAY;
                 clear_screen();
                 display_text("Playing raaga: ", melakartha_raga[selected_raga].name, 0);
-            } 
-            break;
-    
-        case FRONT_BUTTON_HELD:
-            break;
-    
-        case BUTTON_PRESSED:
+                display("   Back", 7);
+                clear_all_grid_leds();
+                for(int i = 0; i < 8; i++) {
+                    for(int j = 0; j < 7; j++) {
+                        set_grid_led(j, i, 100);
+                    }
+                }
+                refresh_grid();
+            } else if(state == PLAY && data[0] == 1) {
+                state = SELECT;
+                clear_screen();
+            }
             break;
     
         case I2C_RECEIVED:
@@ -192,17 +199,17 @@ void process_event(u8 event, u8 *data, u8 length) {
                         knobValue = (knobValue / 65536.0) * 72; //to get a value between 1 and 72. 66536 is the max.
                         for(int i = 0; i < 6; i++) {
                             if(knobValue + i > 71) {
-                                display("", i + 2);
+                                display("", i);
                             } else {
                                 if(i == 0) {
-                                    highlight(melakartha_raga[knobValue + i].name, i + 2);
+                                    highlight(melakartha_raga[knobValue + i].name, i);
                                 } else {
-                                    display(melakartha_raga[knobValue + i].name, i + 2);
+                                    display(melakartha_raga[knobValue + i].name, i);
                                 }
                             }
                         }
                         selected_raga = knobValue;
-                        display_text("Selected raga:", melakartha_raga[knobValue].name, 0);
+                        display("  Select", 7);
                         //if(knobValue != selected_raga) {
                         //    selected_raga = knobValue;
                         //}
