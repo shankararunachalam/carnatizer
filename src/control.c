@@ -9,21 +9,110 @@
 // should talk to the engine via what's defined in engine.h only
 // ----------------------------------------------------------------------------
 
-#include "compiler.h"
+#include <stdio.h>
+#include <inttypes.h>
+#include <malloc.h>
+#include <math.h>
 #include "string.h"
 
 #include "control.h"
 #include "interface.h"
 #include "engine.h"
+#include "music.h"
+#include "raagas.c"
+#include "ratios.c"
 
 preset_meta_t meta;
 preset_data_t preset;
 shared_data_t shared;
 int selected_preset;
+int selected_raga;
+int cursor;
+enum state_opts {
+    INIT,
+    SELECT,
+    PLAY
+};
+
+enum state_opts state;
 
 // ----------------------------------------------------------------------------
 // firmware dependent stuff starts here
 
+// ----------------------------------------------------------------------------
+// prototypes
+
+static void display(char *text, u8 line);
+static void highlight(char *text, u8 line);
+static void display_text(char *text, char *text_value, u8 line);
+static void display_value(char *text, u16 value, u8 line);
+static void display_line(u8 hasValue, char *text, u16 value, u8 line, u8 isHighlight);
+static u16 calculate_cv(u8 row, u8 col);
+
+// ----------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------
+// helper functions
+
+void display(char *text, u8 line) {
+    display_line(0, text, 0, line, 0);
+}
+
+void highlight(char *text, u8 line) {
+    display_line(0, text, 0, line, 1);
+}
+
+void display_text(char *text, char *text_value, u8 line) {
+    u16 length = strlen(text) + strlen(text_value);
+    char *buffer = malloc( sizeof(char) * ( length + 1 ) );
+    strcpy(buffer, text);
+    strcat(buffer, text_value);
+    display_line(0, buffer, 0, line, 0);
+}
+
+void display_value(char *text, u16 value, u8 line) {
+    display_line(1, text, value, line, 0);
+}
+
+void display_line(u8 hasValue, char *text, u16 value, u8 line, u8 isHighlight) {
+    u16 length = strlen(text) + 1;
+    if(hasValue == 1) {
+        length = length + 1 + 10; //length of text plus space plus length of u16 value
+    }
+    u8 foreground = 255;
+    u8 background = 0;
+    char *buffer = malloc( sizeof(char) * ( length + 1 ) );
+    if(hasValue == 1) {
+        snprintf(buffer, length, "%s %hu", text, value);
+    } else {
+        snprintf(buffer, length, "%s", text);
+    }
+    if(isHighlight == 1) {
+        background = 70;
+    }
+    draw_str(buffer, line, foreground, background);
+    refresh_screen();
+}
+
+u16 calculate_cv(u8 col, u8 row) {
+    u8 octave = row;
+    u8 sthana = 6 - col; //weird grid 0 is rightmost
+    u8 numerator = 1, denominator = 1;
+    const char *swara = melakartha_raga[selected_raga].aarohana_note[sthana];
+    display_text("Swara: ", (char *)swara, 5);
+    for(int i = 0; i < 17; i++) {
+        if(strcmp(swarasthanas[i].name, swara) == 0) {
+            numerator = swarasthanas[i].numerator;
+            denominator = swarasthanas[i].denominator;
+            break;
+        }
+    }
+    u16 cv = (409 * octave) + (409 * numerator / denominator); // 4092 / 10 octaves is 409 per octave
+    display_value("Swara value: ", cv, 6);
+    return cv;
+}
+
+// ----------------------------------------------------------------------------
 
 // ----------------------------------------------------------------------------
 // functions for main.c
@@ -53,6 +142,13 @@ void init_control(void) {
     load_preset_meta_from_flash(selected_preset, &meta);
 
     // set up any other initial values and timers
+
+    state = SELECT;
+    //timed event for knob adjustment
+    add_timed_event(0, 50, 1);
+
+    display("Carnatizer.", 0);
+    display("Press button to select Raga ->", 2);
 }
 
 void process_event(u8 event, u8 *data, u8 length) {
@@ -70,33 +166,112 @@ void process_event(u8 event, u8 *data, u8 length) {
             break;
         
         case GRID_KEY_PRESSED:
+            if(state == PLAY) {
+                display_value("data[0]:", data[0], 1);
+                display_value("data[1]:", data[1], 2);
+                display_value("data[2]:", data[2], 3);
+                display_value("data[3]:", data[3], 4);
+                if(data[2] == 1) {
+                    set_cv(0, calculate_cv(data[0], data[1]) << 2);
+                    set_gate(0, 1);
+                } else {
+                    set_cv(0, 0);
+                    set_gate(0, 0);
+                }
+            }
             break;
     
         case GRID_KEY_HELD:
+            display_value("held data[0]:", data[0], 1);
+            display_value("held data[1]:", data[1], 2);
+            display_value("held data[2]:", data[2], 3);
+            display_value("held data[3]:", data[3], 4);
             break;
             
         case ARC_ENCODER_COARSE:
             break;
     
-        case FRONT_BUTTON_PRESSED:
-            break;
-    
-        case FRONT_BUTTON_HELD:
-            break;
-    
         case BUTTON_PRESSED:
+        case FRONT_BUTTON_HELD:
+        case FRONT_BUTTON_PRESSED:
+            if(state == SELECT && data[0] == 1) {
+                state = PLAY;
+                clear_screen();
+                display_text("Playing raaga: ", (char *)melakartha_raga[selected_raga].name, 0);
+                display("   Back", 7);
+                clear_all_grid_leds();
+                for(int i = 0; i < 8; i++) {
+                    for(int j = 0; j < 7; j++) {
+                        set_grid_led(j, i, 100);
+                    }
+                }
+                refresh_grid();
+            } else if(state == PLAY && data[0] == 1) {
+                state = SELECT;
+                clear_screen();
+                clear_all_grid_leds();
+                refresh_grid();
+            }
             break;
     
         case I2C_RECEIVED:
             break;
             
         case TIMED_EVENT:
+            if (data[0] == 0) {
+                switch(state) {
+                    case INIT:
+                        break;
+                    case SELECT:
+                    {
+                        u16 knobValue = get_knob_value(0);
+                        knobValue = (knobValue / 65536.0) * 72; //to get a value between 1 and 72. 66536 is the max.
+                        for(int i = 0; i < 6; i++) {
+                            if(knobValue + i > 71) {
+                                display("", i);
+                            } else {
+                                if(i == 0) {
+                                    highlight((char *)melakartha_raga[knobValue + i].name, i);
+                                } else {
+                                    display((char *)melakartha_raga[knobValue + i].name, i);
+                                }
+                            }
+                        }
+                        selected_raga = knobValue;
+                        display("  Select", 7);
+                        //if(knobValue != selected_raga) {
+                        //    selected_raga = knobValue;
+                        //}
+                        //display("Selected raga:", selected_raga, 5);
+                        //note(0,selected_raga, 100, 1);
+                        //display("write 1:", ((ET[selected_raga] << 2) >> 2) >> 4, 6);
+                        //display("write 2:", ((ET[selected_raga] << 2) >> 2) << 4, 7);
+                        break;
+                    }
+                    case PLAY:
+                    {
+                        /*u16 knobValue = get_knob_value(0);
+                        if((knobValue - selected_raga) > 5) {
+                            state = SELECT;
+                        }*/
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            }
             break;
         
         case MIDI_CONNECTED:
             break;
         
         case MIDI_NOTE:
+            // play a note when a MIDI note is received
+            note(data[0], data[1], data[2], data[3]);
+            display_value("Midi voice:", data[0], 1);
+            display_value("Midi note:", data[1], 2);
+            display_value("Midi volume:", data[2], 3);
+            display_value("Midi on:", data[3], 4);
             break;
         
         case MIDI_CC:
