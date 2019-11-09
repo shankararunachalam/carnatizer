@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <malloc.h>
+#include <math.h>
 #include "string.h"
 
 #include "control.h"
@@ -46,6 +47,7 @@ static void highlight(char *text, u8 line);
 static void display_text(char *text, char *text_value, u8 line);
 static void display_value(char *text, u16 value, u8 line);
 static void display_line(u8 hasValue, char *text, u16 value, u8 line, u8 isHighlight);
+static u16 calculate_cv(u8 row, u8 col);
 
 // ----------------------------------------------------------------------------
 
@@ -87,11 +89,27 @@ void display_line(u8 hasValue, char *text, u16 value, u8 line, u8 isHighlight) {
     }
     if(isHighlight == 1) {
         background = 70;
-        draw_str_highlight(buffer, line, foreground, background);
-    } else {
-        draw_str(buffer, line, foreground, background);
     }
+    draw_str(buffer, line, foreground, background);
     refresh_screen();
+}
+
+u16 calculate_cv(u8 col, u8 row) {
+    u8 octave = row;
+    u8 sthana = 6 - col; //weird grid 0 is rightmost
+    u8 numerator = 1, denominator = 1;
+    const char *swara = melakartha_raga[selected_raga].aarohana_note[sthana];
+    display_text("Swara: ", (char *)swara, 5);
+    for(int i = 0; i < 17; i++) {
+        if(strcmp(swarasthanas[i].name, swara) == 0) {
+            numerator = swarasthanas[i].numerator;
+            denominator = swarasthanas[i].denominator;
+            break;
+        }
+    }
+    u16 cv = (409 * octave) + (409 * numerator / denominator); // 4092 / 10 octaves is 409 per octave
+    display_value("Swara value: ", cv, 6);
+    return cv;
 }
 
 // ----------------------------------------------------------------------------
@@ -148,17 +166,26 @@ void process_event(u8 event, u8 *data, u8 length) {
             break;
         
         case GRID_KEY_PRESSED:
-            display_value("data[0]:", data[0], 1);
-            display_value("data[1]:", data[1], 2);
-            display_value("data[2]:", data[2], 3);
-            display_value("data[3]:", data[3], 4);
+            if(state == PLAY) {
+                display_value("data[0]:", data[0], 1);
+                display_value("data[1]:", data[1], 2);
+                display_value("data[2]:", data[2], 3);
+                display_value("data[3]:", data[3], 4);
+                if(data[2] == 1) {
+                    set_cv(0, calculate_cv(data[0], data[1]) << 2);
+                    set_gate(0, 1);
+                } else {
+                    set_cv(0, 0);
+                    set_gate(0, 0);
+                }
+            }
             break;
     
         case GRID_KEY_HELD:
-            display_value("data[0]:", data[0], 1);
-            display_value("data[1]:", data[1], 2);
-            display_value("data[2]:", data[2], 3);
-            display_value("data[3]:", data[3], 4);
+            display_value("held data[0]:", data[0], 1);
+            display_value("held data[1]:", data[1], 2);
+            display_value("held data[2]:", data[2], 3);
+            display_value("held data[3]:", data[3], 4);
             break;
             
         case ARC_ENCODER_COARSE:
@@ -170,7 +197,7 @@ void process_event(u8 event, u8 *data, u8 length) {
             if(state == SELECT && data[0] == 1) {
                 state = PLAY;
                 clear_screen();
-                display_text("Playing raaga: ", melakartha_raga[selected_raga].name, 0);
+                display_text("Playing raaga: ", (char *)melakartha_raga[selected_raga].name, 0);
                 display("   Back", 7);
                 clear_all_grid_leds();
                 for(int i = 0; i < 8; i++) {
@@ -182,6 +209,8 @@ void process_event(u8 event, u8 *data, u8 length) {
             } else if(state == PLAY && data[0] == 1) {
                 state = SELECT;
                 clear_screen();
+                clear_all_grid_leds();
+                refresh_grid();
             }
             break;
     
@@ -202,9 +231,9 @@ void process_event(u8 event, u8 *data, u8 length) {
                                 display("", i);
                             } else {
                                 if(i == 0) {
-                                    highlight(melakartha_raga[knobValue + i].name, i);
+                                    highlight((char *)melakartha_raga[knobValue + i].name, i);
                                 } else {
-                                    display(melakartha_raga[knobValue + i].name, i);
+                                    display((char *)melakartha_raga[knobValue + i].name, i);
                                 }
                             }
                         }
