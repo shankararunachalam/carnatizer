@@ -14,6 +14,7 @@
 #include <malloc.h>
 #include <math.h>
 #include "string.h"
+#include "delay.h"
 
 #include "control.h"
 #include "interface.h"
@@ -21,17 +22,24 @@
 #include "music.h"
 #include "raagas.c"
 #include "ratios.c"
+#include "files/sarali.c"
 
+const u16 RAGA_CHOICE_COUNT = 72;
+const u16 PLAY_CHOICE_COUNT = 2;
 preset_meta_t meta;
 preset_data_t preset;
 shared_data_t shared;
 int selected_preset;
 int selected_raga;
+int selected_play_choice;
+int used_play_mode;
 int cursor;
 enum state_opts {
     INIT,
-    SELECT,
-    PLAY
+    RAGA_CHOICE,
+    PLAY_CHOICE,
+    PLAY_FILE,
+    PLAY_GRID
 };
 
 enum state_opts state;
@@ -47,7 +55,18 @@ static void highlight(char *text, u8 line);
 static void display_text(char *text, char *text_value, u8 line);
 static void display_value(char *text, u16 value, u8 line);
 static void display_line(u8 hasValue, char *text, u16 value, u8 line, u8 isHighlight);
-static u16 calculate_cv(u8 row, u8 col);
+
+static void display_raga_choices(u16 selection);
+static void display_play_choices(u16 selection);
+static void display_play_grid_screen(void);
+static void display_play_file_screen(void);
+
+static u16 calculate_cv(u8 row, u8 col, u8 isAvarohana);
+static u16 calculate_knob_value(u16 divisions);
+static void set_state(int state_value);
+static void play_swara(u8 pos, u8 isAvarohana);
+void play_one_direction(u8 sarali_row, u8 isAvarohana);
+static void play_file(void);
 
 // ----------------------------------------------------------------------------
 
@@ -94,11 +113,59 @@ void display_line(u8 hasValue, char *text, u16 value, u8 line, u8 isHighlight) {
     refresh_screen();
 }
 
-u16 calculate_cv(u8 col, u8 row) {
-    u8 octave = row;
-    u8 sthana = 6 - col; //weird grid 0 is rightmost
+void display_raga_choices(u16 selection) {
+    clear_screen();
+    for(int i = 0; i < 6; i++) {
+        if(selection + i > 71) {
+            display("", i);
+        } else {
+            if(i == 0) {
+                highlight((char *)melakartha_raga[selection + i].name, i);
+            } else {
+                display((char *)melakartha_raga[selection + i].name, i);
+            }
+        }
+    }
+    display("  Select", 7);
+}
+
+void display_play_choices(u16 selection) {
+    clear_screen();
+    if(selection == 0) {
+        highlight((char *)"Play Grid", 0);
+        display((char *)"Play File", 1);
+    } else {
+        display((char *)"Play Grid", 0);
+        highlight((char *)"Play File", 1);
+    }
+    display("  Select", 7);
+}
+
+static void display_play_grid_screen() {
+    clear_screen();
+    display_text("Playing raaga: ", (char *)melakartha_raga[selected_raga].name, 0);
+    clear_all_grid_leds();
+    for(int i = 0; i < 8; i++) {
+        for(int j = 0; j < 7; j++) {
+            set_grid_led(j, i, 100);
+        }
+    }
+    refresh_grid();    
+    display("   Back", 7);
+}
+
+static void display_play_file_screen() {
+    clear_screen();
+    display("Playing file: ", 0);
+    display("   Back", 7);
+}
+
+u16 calculate_cv(u8 sthana, u8 octave, u8 isAvarohana) {
     u8 numerator = 1, denominator = 1;
     const char *swara = melakartha_raga[selected_raga].aarohana_note[sthana];
+    if(isAvarohana) {
+        swara = melakartha_raga[selected_raga].avarohana_note[sthana];
+    }
     display_text("Swara: ", (char *)swara, 5);
     for(int i = 0; i < 17; i++) {
         if(strcmp(swarasthanas[i].name, swara) == 0) {
@@ -112,6 +179,93 @@ u16 calculate_cv(u8 col, u8 row) {
     return cv;
 }
 
+u16 calculate_knob_value(u16 divisions) {
+    u16 knob_value = get_knob_value(0);
+    knob_value = (knob_value / 65536.0) * divisions; //to get a value between 1 and divisions. 66536 is the max.
+    return knob_value;
+}
+
+void set_state(int state_value) {
+    switch(state_value) {
+        case RAGA_CHOICE:
+            selected_raga = -1;
+            selected_play_choice = -1;
+            break;
+        case PLAY_CHOICE:
+            selected_play_choice = -1;
+            break;
+        case PLAY_GRID:
+            used_play_mode = -1;
+            break;
+        case PLAY_FILE:
+            used_play_mode = -1;
+            break;
+    }
+    state = state_value;
+}
+
+void play_swara(u8 pos, u8 isAvarohana) {
+    set_cv(0, calculate_cv(pos, 3, isAvarohana) << 2);
+    set_gate(0, 1);
+    delay_ms(500);
+    set_gate(0, 0);
+}
+
+void play_one_direction(u8 sarali_row, u8 isAvarohana) {
+    char aarohana_sthanas[8] = {'S', 'R', 'G', 'M', 'P', 'D', 'N', 'Z'};
+    char avarohana_sthanas[8] = {'Z', 'N', 'D', 'P', 'M', 'G', 'R', 'S'};
+    u16 i = 0;
+    char current_sthana = '\0';
+    u8 next_octave = 0;
+    const char *current_sarali = sarali[sarali_row].aarohana;
+    if(isAvarohana) {
+        current_sarali = sarali[sarali_row].avarohana;
+    }
+    while (current_sarali[i] != '\0') {
+        if(current_sarali[i] == ' ') {
+            u8 pos = 0;
+            for(int j = 0; j < 8; j++) {
+                if(isAvarohana) {
+                    if(avarohana_sthanas[j] == current_sthana) {
+                        pos = j;
+                        if(next_octave == 1) {
+                            next_octave = 0;
+                            pos = 0;
+                        }
+                        break;
+                    }
+                } else {
+                    if(aarohana_sthanas[j] == current_sthana) {
+                        pos = j;
+                        if(next_octave == 1) {
+                            next_octave = 0;
+                            pos = 7;
+                        }
+                        break;  
+                    }
+                }
+            }
+            play_swara(pos, isAvarohana);
+        } else if(current_sarali[i] == '.') {
+            next_octave = 1;
+        } else {
+            current_sthana = current_sarali[i];
+        }
+        i++;
+    }
+    set_cv(0, 0);
+    set_gate(0, 0);
+}
+
+void play_file() {
+    u8 sarali_length = sizeof(sarali) / sizeof(sarali[0]);
+    for(int i = 0; i < sarali_length; i++) {
+        play_one_direction(i, 0);
+        play_one_direction(i, 1);
+        //delay_ms(500);
+    }
+    used_play_mode = 1;
+}
 // ----------------------------------------------------------------------------
 
 // ----------------------------------------------------------------------------
@@ -143,12 +297,13 @@ void init_control(void) {
 
     // set up any other initial values and timers
 
-    state = SELECT;
     //timed event for knob adjustment
     add_timed_event(0, 50, 1);
-
-    display("Carnatizer.", 0);
-    display("Press button to select Raga ->", 2);
+    
+    //initial display
+    selected_raga = calculate_knob_value(RAGA_CHOICE_COUNT);
+    display_raga_choices(selected_raga);
+    set_state(RAGA_CHOICE);
 }
 
 void process_event(u8 event, u8 *data, u8 length) {
@@ -166,13 +321,14 @@ void process_event(u8 event, u8 *data, u8 length) {
             break;
         
         case GRID_KEY_PRESSED:
-            if(state == PLAY) {
+        {
+            if(state == PLAY_GRID) {
                 display_value("data[0]:", data[0], 1);
                 display_value("data[1]:", data[1], 2);
                 display_value("data[2]:", data[2], 3);
                 display_value("data[3]:", data[3], 4);
                 if(data[2] == 1) {
-                    set_cv(0, calculate_cv(data[0], data[1]) << 2);
+                    set_cv(0, calculate_cv(6 - data[0], data[1], 0) << 2); //weird grid 0 is rightmost
                     set_gate(0, 1);
                 } else {
                     set_cv(0, 0);
@@ -180,80 +336,63 @@ void process_event(u8 event, u8 *data, u8 length) {
                 }
             }
             break;
+        }
     
         case GRID_KEY_HELD:
+        {
             display_value("held data[0]:", data[0], 1);
             display_value("held data[1]:", data[1], 2);
             display_value("held data[2]:", data[2], 3);
             display_value("held data[3]:", data[3], 4);
             break;
+        }
             
         case ARC_ENCODER_COARSE:
             break;
     
-        case BUTTON_PRESSED:
         case FRONT_BUTTON_HELD:
         case FRONT_BUTTON_PRESSED:
-            if(state == SELECT && data[0] == 1) {
-                state = PLAY;
-                clear_screen();
-                display_text("Playing raaga: ", (char *)melakartha_raga[selected_raga].name, 0);
-                display("   Back", 7);
-                clear_all_grid_leds();
-                for(int i = 0; i < 8; i++) {
-                    for(int j = 0; j < 7; j++) {
-                        set_grid_led(j, i, 100);
-                    }
-                }
-                refresh_grid();
-            } else if(state == PLAY && data[0] == 1) {
-                state = SELECT;
-                clear_screen();
-                clear_all_grid_leds();
-                refresh_grid();
-            }
-            break;
-    
-        case I2C_RECEIVED:
-            break;
-            
-        case TIMED_EVENT:
-            if (data[0] == 0) {
+        {
+            if(data[0] > 0) {
                 switch(state) {
-                    case INIT:
-                        break;
-                    case SELECT:
+                    case RAGA_CHOICE:
                     {
-                        u16 knobValue = get_knob_value(0);
-                        knobValue = (knobValue / 65536.0) * 72; //to get a value between 1 and 72. 66536 is the max.
-                        for(int i = 0; i < 6; i++) {
-                            if(knobValue + i > 71) {
-                                display("", i);
-                            } else {
-                                if(i == 0) {
-                                    highlight((char *)melakartha_raga[knobValue + i].name, i);
-                                } else {
-                                    display((char *)melakartha_raga[knobValue + i].name, i);
-                                }
-                            }
+                        if(selected_raga != -1) {
+                            display_play_choices(selected_play_choice);
+                            set_state(PLAY_CHOICE);
                         }
-                        selected_raga = knobValue;
-                        display("  Select", 7);
-                        //if(knobValue != selected_raga) {
-                        //    selected_raga = knobValue;
-                        //}
-                        //display("Selected raga:", selected_raga, 5);
-                        //note(0,selected_raga, 100, 1);
-                        //display("write 1:", ((ET[selected_raga] << 2) >> 2) >> 4, 6);
-                        //display("write 2:", ((ET[selected_raga] << 2) >> 2) << 4, 7);
                         break;
                     }
-                    case PLAY:
+                    case PLAY_CHOICE:
                     {
-                        /*u16 knobValue = get_knob_value(0);
-                        if((knobValue - selected_raga) > 5) {
-                            state = SELECT;
-                        }*/
+                        if(selected_play_choice == 0) {
+                            display_play_grid_screen();
+                            set_state(PLAY_GRID);
+                        } else if(selected_play_choice == 1) {
+                            display_play_file_screen();
+                            set_state(PLAY_FILE);
+                            play_file();
+                        }
+                        break;
+                    }
+                    case PLAY_FILE:
+                    {
+                        if(used_play_mode != -1) {
+                            selected_raga = calculate_knob_value(RAGA_CHOICE_COUNT);
+                            display_raga_choices(selected_raga);
+                            set_state(RAGA_CHOICE);
+                        }
+                        break;
+                    }
+                    case PLAY_GRID:
+                    {
+                        if(used_play_mode != -1) {
+                            clear_all_grid_leds();
+                            refresh_grid();
+                            selected_raga = calculate_knob_value(RAGA_CHOICE_COUNT);
+                            display_raga_choices(selected_raga);
+                            set_state(RAGA_CHOICE);
+                        }
                         break;
                     }
                     default:
@@ -261,11 +400,55 @@ void process_event(u8 event, u8 *data, u8 length) {
                 }
             }
             break;
+        }
+    
+        case I2C_RECEIVED:
+            break;
+            
+        case TIMED_EVENT:
+        {
+            if (data[0] == 0) {
+                switch(state) {
+                    case RAGA_CHOICE:
+                    {
+                        u16 knob_value = calculate_knob_value(RAGA_CHOICE_COUNT);
+                        if(selected_raga != knob_value) {
+                            selected_raga = knob_value;
+                            display_raga_choices(selected_raga);
+                        }
+                        break;
+                    }
+                    case PLAY_CHOICE:
+                    {
+                        u16 knob_value = calculate_knob_value(PLAY_CHOICE_COUNT);
+                        if(selected_play_choice != knob_value) {
+                            selected_play_choice = knob_value;
+                            display_play_choices(selected_play_choice);
+                        }
+                        break;
+                    }
+                    case PLAY_FILE:
+                    {
+                        //used_play_mode = 1;
+                        break;
+                    }
+                    case PLAY_GRID:
+                    {
+                        used_play_mode = 1;
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            }
+            break;
+        }
         
         case MIDI_CONNECTED:
             break;
         
         case MIDI_NOTE:
+        {
             // play a note when a MIDI note is received
             note(data[0], data[1], data[2], data[3]);
             display_value("Midi voice:", data[0], 1);
@@ -273,6 +456,7 @@ void process_event(u8 event, u8 *data, u8 length) {
             display_value("Midi volume:", data[2], 3);
             display_value("Midi on:", data[3], 4);
             break;
+        }
         
         case MIDI_CC:
             break;
