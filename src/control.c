@@ -26,14 +26,17 @@
 
 const u16 RAGA_CHOICE_COUNT = 72;
 const u16 PLAY_CHOICE_COUNT = 2;
+
 preset_meta_t meta;
 preset_data_t preset;
 shared_data_t shared;
 int selected_preset;
+
+//general params
 int selected_raga;
 int selected_play_choice;
 int used_play_mode;
-int cursor;
+
 enum state_opts {
     INIT,
     RAGA_CHOICE,
@@ -41,8 +44,18 @@ enum state_opts {
     PLAY_FILE,
     PLAY_GRID
 };
-
 enum state_opts state;
+
+//file play params
+enum direction_opts {
+    AAROHANA,
+    AVAROHANA
+};
+enum direction_opts current_direction;
+int sarali_length;
+int current_sarali_row;
+int current_sthana_position;
+int empty_swara_played;
 
 // ----------------------------------------------------------------------------
 // firmware dependent stuff starts here
@@ -61,12 +74,10 @@ static void display_play_choices(u16 selection);
 static void display_play_grid_screen(void);
 static void display_play_file_screen(void);
 
-static u16 calculate_cv(u8 row, u8 col, u8 isAvarohana);
+static u16 calculate_cv(u8 row, u8 col, u8 direction);
 static u16 calculate_knob_value(u16 divisions);
 static void set_state(int state_value);
-static void play_swara(u8 pos, u8 isAvarohana);
-void play_one_direction(u8 sarali_row, u8 isAvarohana);
-static void play_file(void);
+static void play_swara(void);
 
 // ----------------------------------------------------------------------------
 
@@ -132,11 +143,11 @@ void display_raga_choices(u16 selection) {
 void display_play_choices(u16 selection) {
     clear_screen();
     if(selection == 0) {
-        highlight((char *)"Play Grid", 0);
-        display((char *)"Play File", 1);
+        highlight((char *)"Play File", 0);
+        display((char *)"Play Grid", 1);
     } else {
-        display((char *)"Play Grid", 0);
-        highlight((char *)"Play File", 1);
+        display((char *)"Play File", 0);
+        highlight((char *)"Play Grid", 1);
     }
     display("  Select", 7);
 }
@@ -160,10 +171,10 @@ static void display_play_file_screen() {
     display("   Back", 7);
 }
 
-u16 calculate_cv(u8 sthana, u8 octave, u8 isAvarohana) {
+u16 calculate_cv(u8 sthana, u8 octave, u8 direction) {
     u8 numerator = 1, denominator = 1;
     const char *swara = melakartha_raga[selected_raga].aarohana_note[sthana];
-    if(isAvarohana) {
+    if(direction == AVAROHANA) {
         swara = melakartha_raga[selected_raga].avarohana_note[sthana];
     }
     display_text("Swara: ", (char *)swara, 5);
@@ -175,7 +186,7 @@ u16 calculate_cv(u8 sthana, u8 octave, u8 isAvarohana) {
         }
     }
     u16 cv = (409 * octave) + (409 * numerator / denominator); // 4092 / 10 octaves is 409 per octave
-    display_value("Swara value: ", cv, 6);
+    //display_value("Swara value: ", cv, 6);
     return cv;
 }
 
@@ -199,33 +210,37 @@ void set_state(int state_value) {
             break;
         case PLAY_FILE:
             used_play_mode = -1;
+            sarali_length = sizeof(sarali) / sizeof(sarali[0]);
+            current_sarali_row = 0;
+            current_direction = AAROHANA;
+            current_sthana_position = 0;
+            empty_swara_played = 0;
             break;
     }
     state = state_value;
 }
 
-void play_swara(u8 pos, u8 isAvarohana) {
-    set_cv(0, calculate_cv(pos, 3, isAvarohana) << 2);
-    set_gate(0, 1);
-    delay_ms(500);
+void play_swara() {
+    used_play_mode = 1;
     set_gate(0, 0);
-}
-
-void play_one_direction(u8 sarali_row, u8 isAvarohana) {
     char aarohana_sthanas[8] = {'S', 'R', 'G', 'M', 'P', 'D', 'N', 'Z'};
     char avarohana_sthanas[8] = {'Z', 'N', 'D', 'P', 'M', 'G', 'R', 'S'};
-    u16 i = 0;
     char current_sthana = '\0';
     u8 next_octave = 0;
-    const char *current_sarali = sarali[sarali_row].aarohana;
-    if(isAvarohana) {
-        current_sarali = sarali[sarali_row].avarohana;
+    const char *current_sarali = sarali[current_sarali_row].aarohana;
+    if(current_direction == AVAROHANA) {
+        current_sarali = sarali[current_sarali_row].avarohana;
     }
-    while (current_sarali[i] != '\0') {
-        if(current_sarali[i] == ' ') {
-            u8 pos = 0;
+    if(current_sarali[current_sthana_position] != '\0') {
+        u8 pos = 0;
+        current_sthana = current_sarali[current_sthana_position];
+        if(current_sarali[current_sthana_position + 1] != '\0' && current_sarali[current_sthana_position + 1] == '.') {
+            next_octave = 1;
+            current_sthana_position++;
+        }
+        if(current_sarali[current_sthana_position] != ',') {
             for(int j = 0; j < 8; j++) {
-                if(isAvarohana) {
+                if(current_direction == AVAROHANA) {
                     if(avarohana_sthanas[j] == current_sthana) {
                         pos = j;
                         if(next_octave == 1) {
@@ -245,27 +260,30 @@ void play_one_direction(u8 sarali_row, u8 isAvarohana) {
                     }
                 }
             }
-            play_swara(pos, isAvarohana);
-        } else if(current_sarali[i] == '.') {
-            next_octave = 1;
-        } else {
-            current_sthana = current_sarali[i];
+            set_cv(0, calculate_cv(pos, 3, current_direction) << 2);
+            set_gate(0, 1);
         }
-        i++;
+        current_sthana_position++;
+    } else {
+        if(empty_swara_played < 2) {
+            empty_swara_played++;
+        } else {
+            empty_swara_played = 0;
+            current_sthana_position = 0;
+            if(current_direction == AAROHANA) {
+                current_direction = AVAROHANA;
+            } else {
+                current_sarali_row++;
+                if(current_sarali_row == sarali_length) {
+                    display("Finished playing file. ", 0);
+                    display(" ", 5);
+                }
+                current_direction = AAROHANA;
+            }
+        }
     }
-    set_cv(0, 0);
-    set_gate(0, 0);
 }
 
-void play_file() {
-    u8 sarali_length = sizeof(sarali) / sizeof(sarali[0]);
-    for(int i = 0; i < sarali_length; i++) {
-        play_one_direction(i, 0);
-        play_one_direction(i, 1);
-        //delay_ms(500);
-    }
-    used_play_mode = 1;
-}
 // ----------------------------------------------------------------------------
 
 // ----------------------------------------------------------------------------
@@ -307,8 +325,18 @@ void init_control(void) {
 }
 
 void process_event(u8 event, u8 *data, u8 length) {
+    if(event != 0 || (event == 0 && data[0] == 0)) {
+        int display = event;
+        if(event == 0) {
+            display = data[1];
+        }
+        //display_value("Event: ", event, 6);
+    }
     switch (event) {
         case MAIN_CLOCK_RECEIVED:
+            if(state == PLAY_FILE && current_sarali_row < sarali_length) {
+                play_swara();
+            }
             break;
         
         case MAIN_CLOCK_SWITCHED:
@@ -365,13 +393,12 @@ void process_event(u8 event, u8 *data, u8 length) {
                     }
                     case PLAY_CHOICE:
                     {
-                        if(selected_play_choice == 0) {
+                        if(selected_play_choice == 1) {
                             display_play_grid_screen();
                             set_state(PLAY_GRID);
-                        } else if(selected_play_choice == 1) {
+                        } else if(selected_play_choice == 0) {
                             display_play_file_screen();
                             set_state(PLAY_FILE);
-                            play_file();
                         }
                         break;
                     }
@@ -429,7 +456,6 @@ void process_event(u8 event, u8 *data, u8 length) {
                     }
                     case PLAY_FILE:
                     {
-                        //used_play_mode = 1;
                         break;
                     }
                     case PLAY_GRID:
